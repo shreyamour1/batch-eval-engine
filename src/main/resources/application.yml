@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: batch-eval-engine
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+
+batch:
+  topic: prompt-jobs
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.example.batcheval: INFO
