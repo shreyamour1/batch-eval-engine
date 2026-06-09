@@ -50,6 +50,8 @@ class JobControllerIntegrationTest {
     @DynamicPropertySource
     static void kafkaProps(DynamicPropertyRegistry registry) {
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
+        // Disable the app consumer so this test can read the topic directly.
+        registry.add("spring.kafka.listener.auto-startup", () -> "false");
     }
 
     @Autowired

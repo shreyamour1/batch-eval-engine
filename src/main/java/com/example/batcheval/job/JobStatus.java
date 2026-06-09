@@ -3,6 +3,7 @@ package com.example.batcheval.job;
 public enum JobStatus {
     PENDING,      // accepted, not yet started publishing
     PUBLISHING,   // streaming prompts onto Kafka
-    SUBMITTED,    // all prompts published (processing by consumers comes later)
+    RUNNING,      // consumers processing prompts
+    COMPLETED,    // all prompts processed (success or isolated error)
     FAILED        // publishing failed
 }

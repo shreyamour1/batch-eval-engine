@@ -3,6 +3,10 @@ spring:
     name: batch-eval-engine
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${BATCH_CONSUMER_GROUP:batch-eval-workers}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
   servlet:
     multipart:
       max-file-size: 200MB
@@ -10,6 +14,15 @@ spring:
 
 batch:
   topic: prompt-jobs
+  consumer-concurrency: ${BATCH_CONSUMER_CONCURRENCY:3}
+
+inference:
+  url: ${INFERENCE_URL:http://localhost:8081/v1/completions}
+  retry:
+    max-attempts: 5
+    initial-interval-ms: 500
+    multiplier: 2.0
+    jitter-factor: 0.5
 
 server:
   port: 8080

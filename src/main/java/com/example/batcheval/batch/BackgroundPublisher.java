@@ -35,7 +35,7 @@ public class BackgroundPublisher {
         try (InputStream in = Files.newInputStream(tempFile)) {
             int published = promptPublisher.publish(jobId, in);
             state.addPublished(published);
-            state.setStatus(JobStatus.SUBMITTED);
+            state.markRunning(published);
         } catch (Exception e) {
             log.error("Publishing failed for job {}", jobId, e);
             state.setStatus(JobStatus.FAILED);

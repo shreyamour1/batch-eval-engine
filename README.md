@@ -5,10 +5,11 @@ them onto Kafka, and (in later steps) fans them out across a consumer group that
 calls a live inference endpoint, handles rate limits, isolates failures, and
 assembles the results.
 
-> **Status — step 1 of the build.** This slice implements `POST /jobs`: it
-> accepts the batch file, stream-publishes each prompt to Kafka, and returns a
-> Job ID immediately. The consumer/worker side, status/download endpoints, Redis
-> state, and Resilience4j backoff are added in later steps.
+> **Status.** The full pipeline is implemented: `POST /jobs` stream-publishes to
+> Kafka, a bounded consumer group calls the inference endpoint with Resilience4j
+> retry/backoff for 429 and transient 5xx, and `GET /job/{id}/status` /
+> `GET /job/{id}/download` expose progress and results. Job state is in-memory
+> for now (Redis and object storage are planned scale-ups).
 
 ## Architecture
 
@@ -63,7 +64,19 @@ HTTP/1.1 202 Accepted
 {"jobId":"<uuid>","status":"ACCEPTED"}
 ```
 
-### 5. (Optional) Verify the messages landed on Kafka
+### 5. Poll job status and download results
+
+```bash
+JOB_ID="<uuid from step 4>"
+
+curl http://localhost:8080/job/$JOB_ID/status
+curl http://localhost:8080/job/$JOB_ID/download
+```
+
+Status moves through `PENDING` → `PUBLISHING` → `RUNNING` → `COMPLETED`. Download
+returns `409 Conflict` until the job is complete.
+
+### 6. (Optional) Verify the messages landed on Kafka
 
 ```bash
 docker exec -it kafka /opt/bitnami/kafka/bin/kafka-console-consumer.sh \
@@ -80,17 +93,19 @@ mvn test
 ```
 
 - `PromptPublisherTest` — unit test, mocks Kafka and asserts one message per prompt.
-- `JobControllerIntegrationTest` — spins up a real Kafka via Testcontainers,
-  POSTs a file through the web layer, and consumes the topic to confirm the
-  prompts were published. **Requires Docker to be running.**
+- `InferenceClientTest` — WireMock proves 429 retry and non-retry on 400.
+- `JobQueryControllerTest` — status and download endpoints.
+- `JobControllerIntegrationTest` — Kafka publish path via Testcontainers.
+- `BatchPipelineIntegrationTest` — end-to-end: submit → consume → inference → download.
+  **Requires Docker to be running.**
 
 ## API
 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/jobs` | Submit a batch file (multipart field `file`); returns `202` + Job ID |
-| `GET` | `/job/{id}/status` | _(coming in a later step)_ |
-| `GET` | `/job/{id}/download` | _(coming in a later step)_ |
+| `GET` | `/job/{id}/status` | Job progress: status, total, succeeded, failed |
+| `GET` | `/job/{id}/download` | Compiled results array (409 until complete) |
 
 ## Project layout
 
@@ -98,8 +113,13 @@ mvn test
 src/main/java/com/example/batcheval
 ├── BatchEvalApplication.java        # entry point
 ├── api/                             # REST layer
-│   ├── JobController.java
-│   └── dto/JobSubmissionResponse.java
+│   ├── JobController.java           # POST /jobs
+│   ├── JobQueryController.java      # GET /job/{id}/status, /download
+│   └── dto/
+├── worker/                          # Kafka consumer + inference
+│   ├── PromptWorker.java
+│   ├── InferenceClient.java
+│   └── ResultWriter.java
 ├── batch/                           # ingestion + publishing
 │   ├── BatchSubmissionService.java  # request-thread orchestration
 │   ├── BackgroundPublisher.java     # @Async publishing
@@ -109,9 +129,11 @@ src/main/java/com/example/batcheval
 │   ├── JobRegistry.java
 │   ├── JobState.java
 │   └── JobStatus.java
-└── config/                          # Kafka + async configuration
+└── config/
     ├── KafkaProducerConfig.java
+    ├── KafkaConsumerConfig.java
     ├── KafkaTopicConfig.java
+    ├── Resilience4jConfig.java
     └── AsyncConfig.java
 ```
 
