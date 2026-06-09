@@ -241,7 +241,28 @@ than double-counts.
 design. The idempotency key is what makes redelivery safe; without it,
 at-least-once delivery would inflate the success counts.
 
----
+
+### 5.8 Design trade-offs considered
+
+This design intentionally optimizes for durability, bounded memory, and
+recoverability over absolute simplicity. The main trade-offs are:
+
+| Trade-off | What we gain | What we accept |
+|---|---|---|
+| Kafka instead of an in-process executor | Durable work queue, consumer-group scaling, crash recovery | More infrastructure to run locally, in CI, and in production |
+| Async job API instead of synchronous HTTP | Fast client response, no long-held request threads, works for large batches | Client must poll status and download results later |
+| At-least-once delivery instead of exactly-once processing | Simpler, resilient recovery model with Kafka redelivery | Result writes and counters must be idempotent to avoid duplicates |
+| Redis counters plus object storage instead of one data store | Fast progress reads and scalable result storage | More moving pieces and a small amount of cross-store coordination |
+| Capped retries instead of retrying forever | Prevents stuck jobs and protects the upstream endpoint | Some prompts may be marked failed even if the endpoint would recover later |
+| Streaming publish instead of full validation up front | Flat memory usage for 500k prompts | Some malformed records may be discovered during publish or processing rather than before the job is accepted |
+
+The key design choice is to keep the service operational under stress, even when
+that means a little more infrastructure and a slightly more complex client
+workflow. For a small-only workload, a single-process queue and Redis-only
+results would be simpler; for the stated 500k-item and crash-recovery goals, the
+extra moving parts buy reliability and scale.
+
+----------
 
 ## 6. Technology Choices
 
@@ -289,3 +310,76 @@ cheapest tier transition in the table.
 | Consumer / process crash mid-job | Kafka redelivers uncommitted messages; Redis holds progress; job resumes |
 | Duplicate delivery (at-least-once) | Result writes are idempotent (keyed by prompt id), so duplicates overwrite rather than double-count |
 | Poison message (repeatedly fails) | Routed to a dead-letter topic after capped retries for later inspection |
+
+
+
+## 9. Observability, Metrics, and Tracking
+
+Observability is treated as part of the design rather than an afterthought,
+because the hardest failures here are slow drains, rate-limit storms, and jobs
+that appear to be running but are no longer making progress.
+
+**Metrics.** Expose application metrics through Spring Boot Actuator and
+Micrometer, exported to Prometheus and visualized in Grafana.
+
+| Metric | Type | Purpose |
+|---|---|---|
+| `jobs_submitted_total` | Counter | Tracks batch volume over time |
+| `job_prompts_total` | Counter / distribution | Tracks submitted prompt counts and job sizes |
+| `job_prompts_succeeded_total` | Counter | Tracks successful prompt completions |
+| `job_prompts_failed_total` | Counter | Tracks isolated prompt failures |
+| `job_duration_seconds` | Timer / histogram | Measures end-to-end job completion time |
+| `prompt_processing_duration_seconds` | Timer / histogram | Measures per-prompt worker latency |
+| `inference_request_duration_seconds` | Timer / histogram | Tracks upstream endpoint latency |
+| `inference_retries_total` | Counter | Shows retry pressure from 429 / 5xx responses |
+| `inference_rate_limited_total` | Counter | Tracks upstream 429 events |
+| `kafka_consumer_lag` | Gauge | Detects backlog growth and slow consumers |
+| `redis_update_failures_total` | Counter | Detects status/counter write problems |
+| `object_store_write_failures_total` | Counter | Detects result persistence failures |
+| `dead_letter_messages_total` | Counter | Tracks poison messages requiring inspection |
+
+**Structured logs.** Every log line should include `jobId`, `promptId`,
+`attempt`, `partition`, and `offset` where applicable. This makes it possible to
+trace a single prompt from submission through Kafka consumption, inference,
+result write, and final job status. Logs should record job submission, publish
+completion, retry attempts, permanent failures, dead-letter routing, and job
+completion.
+
+**Tracing.** Add OpenTelemetry instrumentation for the request path and async
+worker path. A trace should connect:
+
+1. `POST /jobs`
+2. streaming publish to Kafka
+3. Kafka consume
+4. inference endpoint call
+5. result write to object storage
+6. Redis counter update
+
+Because Kafka breaks the synchronous request chain, propagate trace context in
+message headers so a job can still be followed across producer and consumer
+boundaries.
+
+**Dashboards.** Grafana dashboards should show:
+
+- active jobs by status
+- job throughput and completion rate
+- success/failure ratio
+- p50 / p95 / p99 inference latency
+- retry and 429 rates
+- Kafka consumer lag by partition
+- object-store write errors
+- dead-letter queue growth
+
+**Alerts.** Alert on conditions that indicate user-visible degradation:
+
+- Kafka consumer lag growing for more than a fixed window
+- high 429 rate or retry rate
+- p95 inference latency above the expected threshold
+- no progress for a running job for N minutes
+- dead-letter messages above threshold
+- Redis or object-store write failures
+- job failure ratio above threshold
+
+This gives operators both real-time health signals and enough per-job detail to
+answer user-facing questions like "is my batch still running?", "why did this
+prompt fail?", and "are we being throttled by the upstream endpoint?"
